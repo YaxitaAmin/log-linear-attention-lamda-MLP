@@ -49,13 +49,17 @@ from hattention.mamba_apis import (
     hselective_state_update,
     hmamba_chunk_scan_combined,
     hmamba_split_conv1d_scan_combined)
+from hattention.lambda_mlp import LambdaMLPSoftplus, LambdaMLPSoftmax
 from hattention.configuration_hattention import HAttentionConfig
 
 MAX_SEQUENCE_LENGTH = 2048 * 8
 LAMBDA_LEVEL_BASE = 2
 LAMBDA_HTYPE = HType.WEAK
 LAMBDA_HSTRUCT = HStruct.MAMBA2
-LAMBDA_LEVEL_FIXED = True
+# LAMBDA_LEVEL_FIXED = True
+# Options: "fixed", "mlp_softplus", "mlp_softmax"
+LAMBDA_MODE_TYPE = "fixed"
+LAMBDA_MLP_HIDDEN_DIM = 64  # dh ∈ {32, 64, 128}
 MAX_NUM_LEVELS = get_num_levels(
     length=MAX_SEQUENCE_LENGTH,
     base=LAMBDA_LEVEL_BASE)
@@ -190,14 +194,34 @@ class HAttentionMixer(nn.Module):
             padding=config.conv_kernel - 1,
         )
 
-        if LAMBDA_LEVEL_FIXED:
+        # if LAMBDA_LEVEL_FIXED:
+        #     self.num_lambda_dims = MAX_NUM_LEVELS
+        #     self.lambda_level_module = None
+        # else:
+        #     self.num_lambda_dims = 16
+        #     self.lambda_level_module = LambdaLevelMLP(
+        #         dim=self.num_lambda_dims,
+        #         max_num_levels=MAX_NUM_LEVELS)
+        if LAMBDA_MODE_TYPE == "fixed":
             self.num_lambda_dims = MAX_NUM_LEVELS
             self.lambda_level_module = None
-        else:
-            self.num_lambda_dims = 16
-            self.lambda_level_module = LambdaLevelMLP(
-                dim=self.num_lambda_dims,
-                max_num_levels=MAX_NUM_LEVELS)
+            self.lambda_level_fixed = True
+
+        elif LAMBDA_MODE_TYPE == "mlp_softplus":
+            self.num_lambda_dims = LAMBDA_MLP_HIDDEN_DIM
+            self.lambda_level_module = LambdaMLPSoftplus(
+                input_dim=LAMBDA_MLP_HIDDEN_DIM,
+                hidden_dim=LAMBDA_MLP_HIDDEN_DIM,
+                num_levels=MAX_NUM_LEVELS)
+            self.lambda_level_fixed = False
+
+        elif LAMBDA_MODE_TYPE == "mlp_softmax":
+            self.num_lambda_dims = LAMBDA_MLP_HIDDEN_DIM
+            self.lambda_level_module = LambdaMLPSoftmax(
+                input_dim=LAMBDA_MLP_HIDDEN_DIM,
+                hidden_dim=LAMBDA_MLP_HIDDEN_DIM,
+                num_levels=MAX_NUM_LEVELS)
+            self.lambda_level_fixed = False
 
         # projection of the input hidden states
         projection_size = self.intermediate_size + self.conv_dim + self.num_heads * (self.num_lambda_dims + 1)

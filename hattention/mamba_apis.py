@@ -27,7 +27,7 @@ try:
     from torchtune.modules import RotaryPositionalEmbeddings
 except ImportError:
     RotaryPositionalEmbeddings = None
-
+from hattention.lambda_mlp import LambdaMLPSoftplus, LambdaMLPSoftmax
 
 class LambdaLevelMLP(torch.nn.Module):
     def __init__(self, dim: int, max_num_levels: int, **kwargs) -> None:
@@ -85,29 +85,54 @@ def compute_lambda(
         raise ValueError
 
 
+# def compute_lambda_maybe_fixed(
+#     L: torch.Tensor,
+#     dl: torch.Tensor,
+#     lambda_mode: Optional[str],
+#     lambda_level_max: int,
+#     lambda_level_fixed: bool,
+#     lambda_level_module: LambdaLevelMLP,
+# ) -> torch.Tensor:
+#     if lambda_level_fixed:
+#         if not all([
+#             L.ndim in [3, 4],
+#             dl.ndim in [3, 4],
+#             L.shape[-1] == lambda_level_max,
+#             dl.shape[-1] == lambda_level_max]):
+#             raise ValueError
+#         return compute_lambda(L=L, dl=dl, lambda_mode=lambda_mode)
+#     else:
+#         if not all([
+#             L.ndim in [3, 4],
+#             dl.ndim in [3, 4],
+#             L.shape[-1] == lambda_level_module.dim,
+#             dl.shape[-1] == lambda_level_module.dim]):
+#             raise ValueError
+#         warnings.warn(click.style("[HAttention] Using non-fixed lambda mode", fg="yellow"))
+#         L_new, dl_new = lambda_level_module(L, dl, num_levels=lambda_level_max)
+#         return compute_lambda(L=L_new, dl=dl_new, lambda_mode=lambda_mode)
+
 def compute_lambda_maybe_fixed(
     L: torch.Tensor,
     dl: torch.Tensor,
     lambda_mode: Optional[str],
     lambda_level_max: int,
     lambda_level_fixed: bool,
-    lambda_level_module: LambdaLevelMLP,
+    lambda_level_module,
 ) -> torch.Tensor:
+    
     if lambda_level_fixed:
-        if not all([
-            L.ndim in [3, 4],
-            dl.ndim in [3, 4],
-            L.shape[-1] == lambda_level_max,
-            dl.shape[-1] == lambda_level_max]):
-            raise ValueError
+        # Original baseline: λ = softplus(L * W·x)
         return compute_lambda(L=L, dl=dl, lambda_mode=lambda_mode)
+    
+    elif isinstance(lambda_level_module, (LambdaMLPSoftplus, LambdaMLPSoftmax)):
+        # YOUR MLP variants 🔥
+        # dl shape: (batch, seqlen, nheads, input_dim)
+        # output shape: (batch, seqlen, nheads, num_levels)
+        return lambda_level_module(dl)
+    
     else:
-        if not all([
-            L.ndim in [3, 4],
-            dl.ndim in [3, 4],
-            L.shape[-1] == lambda_level_module.dim,
-            dl.shape[-1] == lambda_level_module.dim]):
-            raise ValueError
+        # Original RoPE-based MLP (their expensive version)
         warnings.warn(click.style("[HAttention] Using non-fixed lambda mode", fg="yellow"))
         L_new, dl_new = lambda_level_module(L, dl, num_levels=lambda_level_max)
         return compute_lambda(L=L_new, dl=dl_new, lambda_mode=lambda_mode)
