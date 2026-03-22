@@ -108,7 +108,7 @@ def make_levels_matrix(
     default: int = -1,
     clamp_min: Optional[int] = None,
     file_name: Optional[str] = None,
-    cached_length: Optional[int] = 16384,
+    cached_length: Optional[int] = None,
 ) -> Int[torch.Tensor, "length length"]:
 
     if cached_length is not None:
@@ -129,7 +129,7 @@ def make_levels_matrix(
             raise ValueError
         return cached_levels[:length, :length].contiguous()
 
-    if (length, base, htype, default) in CACHED_LEVELS_MATRICES.keys():
+    if False and (length, base, htype, default) in CACHED_LEVELS_MATRICES.keys():
         levels = torch.load(
             CACHED_LEVELS_MATRICES[(length, base, htype, default)],
             map_location=device,

@@ -27,20 +27,34 @@ from transformers.activations import ACT2FN
 from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.deprecation import deprecate_kwarg
-from fla.modules import GatedMLP
-from fla.models.mamba2.modeling_mamba2 import (
-    logger,
-    RMSNorm,
-    RMSNormGated,
-    Mamba2Cache,
-    Mamba2Output,
-    Mamba2CausalLMOutput,
-    FusedCrossEntropyLoss,
-    FusedLinearCrossEntropyLoss,
-    causal_conv1d_fn,
-    causal_conv1d_update,
-    pad_tensor_by_size,
-    is_fast_path_available)
+import importlib.util as _ilu
+import types as _types
+
+def _load_fla_module(rel_path):
+    base = "/scratch/zt1/project/msml612/user/yaxita/log-linear-attention/flame/3rdparty/flash-linear-attention/"
+    spec = _ilu.spec_from_file_location("_fla_mod", base + rel_path)
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+_mlp_mod       = _load_fla_module("fla/modules/mlp.py")
+_layernorm_mod = _load_fla_module("fla/modules/layernorm_gated.py")
+_layernorm2_mod= _load_fla_module("fla/modules/layernorm.py")
+_mamba2_mod    = _load_fla_module("fla/models/mamba2/modeling_mamba2.py")
+
+GatedMLP               = _mlp_mod.GatedMLP
+RMSNormGated           = _layernorm_mod.RMSNormGated
+RMSNorm                = torch.nn.RMSNorm
+logger                 = _mamba2_mod.logger
+Mamba2Cache            = _mamba2_mod.Mamba2Cache
+Mamba2Output           = _mamba2_mod.Mamba2Output
+Mamba2CausalLMOutput   = _mamba2_mod.Mamba2CausalLMOutput
+FusedCrossEntropyLoss  = _mamba2_mod.FusedCrossEntropyLoss
+FusedLinearCrossEntropyLoss = _mamba2_mod.FusedLinearCrossEntropyLoss
+causal_conv1d_fn       = _mamba2_mod.causal_conv1d_fn
+causal_conv1d_update   = _mamba2_mod.causal_conv1d_update
+pad_tensor_by_size     = _mamba2_mod.pad_tensor_by_size
+is_fast_path_available = _mamba2_mod.is_fast_path_available
 
 from hattention.base import HType, HStruct, get_num_levels
 from hattention.recurrent import HState
@@ -56,23 +70,18 @@ MAX_SEQUENCE_LENGTH = 2048 * 8
 LAMBDA_LEVEL_BASE = 2
 LAMBDA_HTYPE = HType.WEAK
 LAMBDA_HSTRUCT = HStruct.MAMBA2
-# LAMBDA_LEVEL_FIXED = True
 # Options: "fixed", "mlp_softplus", "mlp_softmax"
 LAMBDA_MODE_TYPE = "fixed"
-LAMBDA_MLP_HIDDEN_DIM = 64  # dh ∈ {32, 64, 128}
+LAMBDA_MLP_HIDDEN_DIM = 64  # dh in {32, 64, 128}
 MAX_NUM_LEVELS = get_num_levels(
     length=MAX_SEQUENCE_LENGTH,
     base=LAMBDA_LEVEL_BASE)
 
 
 def apply_mask_to_padding_states(hidden_states, attention_mask):
-    """
-    Tunes out the hidden states for padding tokens, see https://github.com/state-spaces/mamba/issues/66
-    """
     if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
         dtype = hidden_states.dtype
         hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
-
     return hidden_states
 
 
@@ -115,7 +124,6 @@ class HAttentionCache(Mamba2Cache):
                     config.head_dim,
                     MAX_NUM_LEVELS,
                 ),
-                # we keep HSSM state in high precision
                 dtype=torch.float32,
                 device=device,
             )
@@ -153,12 +161,6 @@ class HAttentionCache(Mamba2Cache):
 
 
 class HAttentionMixer(nn.Module):
-    """
-    Compute ∆, A, B, C, and D the state space parameters and compute the `contextualized_states`.
-    A, D are input independent (see Mamba paper [1] Section 3.5.2 "Interpretation of A" for why A isn't selective)
-    ∆, B, C are input-dependent (this is a key difference between Mamba and the linear time invariant S4,
-    and is why Mamba is called **selective** state spaces)
-    """
 
     def __init__(self, config: HAttentionConfig, layer_idx: int):
         super().__init__()
@@ -194,34 +196,30 @@ class HAttentionMixer(nn.Module):
             padding=config.conv_kernel - 1,
         )
 
-        # if LAMBDA_LEVEL_FIXED:
-        #     self.num_lambda_dims = MAX_NUM_LEVELS
-        #     self.lambda_level_module = None
-        # else:
-        #     self.num_lambda_dims = 16
-        #     self.lambda_level_module = LambdaLevelMLP(
-        #         dim=self.num_lambda_dims,
-        #         max_num_levels=MAX_NUM_LEVELS)
+        # --- Lambda mode selection ---
+        # num_lambda_dims is ALWAYS MAX_NUM_LEVELS
+        # because dl is always projected to MAX_NUM_LEVELS by in_proj
+        # MLP takes dl (num_levels) -> hidden -> num_levels
+        self.num_lambda_dims = MAX_NUM_LEVELS
+
         if LAMBDA_MODE_TYPE == "fixed":
-            self.num_lambda_dims = MAX_NUM_LEVELS
             self.lambda_level_module = None
             self.lambda_level_fixed = True
 
         elif LAMBDA_MODE_TYPE == "mlp_softplus":
-            self.num_lambda_dims = LAMBDA_MLP_HIDDEN_DIM
             self.lambda_level_module = LambdaMLPSoftplus(
-                input_dim=LAMBDA_MLP_HIDDEN_DIM,
-                hidden_dim=LAMBDA_MLP_HIDDEN_DIM,
-                num_levels=MAX_NUM_LEVELS)
+                num_levels=MAX_NUM_LEVELS,
+                hidden_dim=LAMBDA_MLP_HIDDEN_DIM)
             self.lambda_level_fixed = False
 
         elif LAMBDA_MODE_TYPE == "mlp_softmax":
-            self.num_lambda_dims = LAMBDA_MLP_HIDDEN_DIM
             self.lambda_level_module = LambdaMLPSoftmax(
-                input_dim=LAMBDA_MLP_HIDDEN_DIM,
-                hidden_dim=LAMBDA_MLP_HIDDEN_DIM,
-                num_levels=MAX_NUM_LEVELS)
+                num_levels=MAX_NUM_LEVELS,
+                hidden_dim=LAMBDA_MLP_HIDDEN_DIM)
             self.lambda_level_fixed = False
+
+        else:
+            raise ValueError(f"Unknown LAMBDA_MODE_TYPE: {LAMBDA_MODE_TYPE}")
 
         # projection of the input hidden states
         projection_size = self.intermediate_size + self.conv_dim + self.num_heads * (self.num_lambda_dims + 1)
@@ -230,14 +228,9 @@ class HAttentionMixer(nn.Module):
             projection_size,
             bias=config.use_bias,
         )
-        # selective projection used to make dt, B and C input dependant
 
-        # time step projection (discretization)
-        # instantiate once and copy inv_dt in init_weights of PretrainedModel
         self.dt_bias = nn.Parameter(torch.ones(self.num_heads))
 
-        # S4D real initialization. These are not discretized!
-        # The core is to load them, compute the discrete states, then write the updated state. Keeps the memory bounded
         A = torch.arange(1, self.num_heads + 1)
         self.A_log = nn.Parameter(torch.log(A))
         self.A_log._no_weight_decay = True
@@ -273,20 +266,17 @@ class HAttentionMixer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ):
         if attention_mask is not None:
-            # only supporting this in decoding
             if cache_params is None:
                 raise NotImplementedError
         if self.activation not in ["silu", "swish"]:
             raise ValueError
 
-        # 1. Gated MLP's linear projection
         hidden_states = apply_mask_to_padding_states(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
         )
         projected_states = self.in_proj(hidden_states)
 
-        # Set up dimensions for reshapes later
         batch_size, seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
         d_mlp = (
@@ -298,7 +288,6 @@ class HAttentionMixer(nn.Module):
         if d_mlp != 0:
             raise ValueError
 
-        # Single step calculations via cache
         if cache_params is not None and cache_position is not None and cache_position[0] > 0:
             if hidden_states.shape[1] != 1:
                 raise ValueError
@@ -314,7 +303,6 @@ class HAttentionMixer(nn.Module):
                 dim=-1,
             )
 
-            # 2. Convolution sequence transformation
             xBC = causal_conv1d_update(
                 xBC,
                 cache_params.conv_states[self.layer_idx],
@@ -333,36 +321,12 @@ class HAttentionMixer(nn.Module):
                 dim=-1,
             )
 
-            # 3. SSM transformation
-            A = -torch.exp(self.A_log.float())  # (nheads,)
-            B = rearrange(
-                B,
-                "b (g n) -> b g n",
-                b=batch_size,
-                g=self.n_groups,
-                n=self.ssm_state_size,
-            )
-            C = rearrange(
-                C,
-                "b (g n) -> b g n",
-                b=batch_size,
-                g=self.n_groups,
-                n=self.ssm_state_size,
-            )
-            x_reshaped = rearrange(
-                x,
-                "b (h p) -> b h p",
-                b=batch_size,
-                h=self.num_heads,
-                p=self.head_dim,
-            )
-            dl_reshaped = rearrange(
-                dl,
-                "b (h ell) -> b h ell",
-                b=batch_size,
-                h=self.num_heads,
-                ell=self.num_lambda_dims,
-            )
+            A = -torch.exp(self.A_log.float())
+            B = rearrange(B, "b (g n) -> b g n", b=batch_size, g=self.n_groups, n=self.ssm_state_size)
+            C = rearrange(C, "b (g n) -> b g n", b=batch_size, g=self.n_groups, n=self.ssm_state_size)
+            x_reshaped = rearrange(x, "b (h p) -> b h p", b=batch_size, h=self.num_heads, p=self.head_dim)
+            dl_reshaped = rearrange(dl, "b (h ell) -> b h ell", b=batch_size, h=self.num_heads, ell=self.num_lambda_dims)
+
             y, hssm_state = hselective_state_update(
                 cache_params.hssm_states[self.layer_idx],
                 x_reshaped,
@@ -381,36 +345,22 @@ class HAttentionMixer(nn.Module):
                 lambda_level_base=LAMBDA_LEVEL_BASE,
                 lambda_htype=LAMBDA_HTYPE,
                 lambda_hstruct=LAMBDA_HSTRUCT,
-                lambda_level_fixed=LAMBDA_LEVEL_FIXED,
+                lambda_level_fixed=self.lambda_level_fixed,
                 lambda_level_module=self.lambda_level_module,
             )
-            cache_params.update_hssm_state(
-                layer_idx=self.layer_idx,
-                new_hssm_state=hssm_state,
-            )
-            y = rearrange(
-                y,
-                "b h p -> b (h p)",
-                b=batch_size,
-                h=self.num_heads,
-                p=self.head_dim,
-            )
+            cache_params.update_hssm_state(layer_idx=self.layer_idx, new_hssm_state=hssm_state)
+            y = rearrange(y, "b h p -> b (h p)", b=batch_size, h=self.num_heads, p=self.head_dim)
             y = self.norm(y, gate)
-
-            # 4. Final linear projection
             out = self.out_proj(y)[:, None, ...]
 
-        # Fused calculations or step by step if no initialized cache is found
         else:
-            A = -torch.exp(self.A_log.float())  # (num_heads) or (intermediate_size, state_size)
+            A = -torch.exp(self.A_log.float())
             dt_limit_kwargs = {} if self.time_step_limit == (0.0, float("inf")) else {"dt_limit": self.time_step_limit}
 
-            # 2-4. Fused kernel for conv1d, SSM, and the final projection
-            if self.training and cache_params is None:
+            if False:  # disabled gradient checkpointing
                 out = torch.utils.checkpoint.checkpoint(
                     hmamba_split_conv1d_scan_combined,
                     use_reentrant=False,
-                    # function arguments
                     zxbcdtdl=projected_states,
                     conv1d_weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     conv1d_bias=self.conv1d.bias,
@@ -419,7 +369,7 @@ class HAttentionMixer(nn.Module):
                     L=self.L,
                     D=self.D,
                     chunk_size=self.chunk_size,
-                    seq_idx=None,  # was seq_idx
+                    seq_idx=None,
                     activation=self.activation,
                     rmsnorm_weight=self.norm.weight,
                     rmsnorm_eps=self.norm.eps,
@@ -435,7 +385,7 @@ class HAttentionMixer(nn.Module):
                     lambda_level_base=LAMBDA_LEVEL_BASE,
                     lambda_htype=LAMBDA_HTYPE,
                     lambda_hstruct=LAMBDA_HSTRUCT,
-                    lambda_level_fixed=LAMBDA_LEVEL_FIXED,
+                    lambda_level_fixed=self.lambda_level_fixed,
                     lambda_level_module=self.lambda_level_module,
                 )
 
@@ -451,8 +401,6 @@ class HAttentionMixer(nn.Module):
                     dim=-1,
                 )
 
-                # 2. Convolution sequence transformation
-                # Init cache
                 if cache_params is not None:
                     xBC_t = rearrange(xBC, "b l d -> b d l")
                     conv_states = torch.nn.functional.pad(
@@ -472,22 +420,14 @@ class HAttentionMixer(nn.Module):
                     activation=self.activation,
                 ).transpose(1, 2)
 
-                xBC = apply_mask_to_padding_states(
-                    hidden_states=xBC,
-                    attention_mask=attention_mask,
-                )
+                xBC = apply_mask_to_padding_states(hidden_states=xBC, attention_mask=attention_mask)
 
                 x, B, C = torch.split(
                     xBC,
-                    [
-                        self.intermediate_size,
-                        groups_time_state_size,
-                        groups_time_state_size,
-                    ],
+                    [self.intermediate_size, groups_time_state_size, groups_time_state_size],
                     dim=-1,
                 )
 
-                # 3. SSM transformation
                 y, hssm_state = hmamba_chunk_scan_combined(
                     rearrange(x, "b l (h p) -> b l h p", b=batch_size, l=seq_len, p=self.head_dim),
                     dt=dt,
@@ -509,29 +449,15 @@ class HAttentionMixer(nn.Module):
                     lambda_level_base=LAMBDA_LEVEL_BASE,
                     lambda_htype=LAMBDA_HTYPE,
                     lambda_hstruct=LAMBDA_HSTRUCT,
-                    lambda_level_fixed=LAMBDA_LEVEL_FIXED,
+                    lambda_level_fixed=self.lambda_level_fixed,
                     lambda_level_module=self.lambda_level_module,
                 )
 
-                # Init cache
                 if hssm_state is not None and cache_params is not None:
-                    cache_params.update_hssm_state(
-                        layer_idx=self.layer_idx,
-                        new_hssm_state=hssm_state,
-                    )
+                    cache_params.update_hssm_state(layer_idx=self.layer_idx, new_hssm_state=hssm_state)
 
-                y = rearrange(
-                    y,
-                    "b l h p -> b l (h p)",
-                    b=batch_size,
-                    l=seq_len,
-                    h=self.num_heads,
-                    p=self.head_dim,
-                )
-                # Multiply "gate" branch and apply extra normalization layer
+                y = rearrange(y, "b l h p -> b l (h p)", b=batch_size, l=seq_len, h=self.num_heads, p=self.head_dim)
                 y = self.norm(y, gate)
-
-                # 4. Final linear projection
                 out = self.out_proj(y)
 
         return out
@@ -586,10 +512,7 @@ class HAttentionBlock(nn.Module):
             attention_mask=attention_mask,
         )
         if self.config.fuse_norm:
-            hidden_states, residual = self.mlp_norm(
-                hidden_states,
-                residual=residual,
-                prenorm=True)
+            hidden_states, residual = self.mlp_norm(hidden_states, residual=residual, prenorm=True)
         else:
             hidden_states = residual + hidden_states
             residual = hidden_states
@@ -600,26 +523,14 @@ class HAttentionBlock(nn.Module):
 
 
 class HAttentionPreTrainedModel(PreTrainedModel, GenerationMixin):
-    """
-    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
-    models.
-    """
-
     config_class = HAttentionConfig
     base_model_prefix = "backbone"
     _no_split_modules = ["HAttentionBlock"]
     supports_gradient_checkpointing = True
     _is_stateful = True
 
-    def _init_weights(
-        self,
-        module: nn.Module,
-        num_residuals_per_layer: int = 2,  # HAttention + MLP
-    ):
-        """Initialize the weights."""
+    def _init_weights(self, module: nn.Module, num_residuals_per_layer: int = 2):
         if isinstance(module, HAttentionMixer):
-
-            # --- A_log ---
             A = torch.arange(1, module.num_heads + 1)
             with torch.no_grad():
                 if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
@@ -628,22 +539,18 @@ class HAttentionPreTrainedModel(PreTrainedModel, GenerationMixin):
                     logger.warning_once("`A_log` is a DTensor, skipping initialization")
             module.A_log._no_weight_decay = True
 
-            # --- D ---
             nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
-            # --- L ---
             nn.init.ones_(module.L)
             module.L._no_weight_decay = True
 
-            # --- dt_bias ---
             dt = torch.exp(
                 torch.rand(self.config.num_heads)
                 * (math.log(self.config.time_step_max) - math.log(self.config.time_step_min))
                 + math.log(self.config.time_step_min)
             ).clamp(min=self.config.time_step_floor)
 
-            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
                 if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
@@ -653,12 +560,9 @@ class HAttentionPreTrainedModel(PreTrainedModel, GenerationMixin):
             module.dt_bias._no_reinit = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
-                # guard against deprecated behavior
                 if hasattr(module.bias, "_no_reinit"):
                     raise ValueError("This is not supposed to happen")
         elif isinstance(module, nn.Embedding):
@@ -667,26 +571,14 @@ class HAttentionPreTrainedModel(PreTrainedModel, GenerationMixin):
             module.reset_parameters()
 
         if self.config.rescale_prenorm_residual:
-            # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
-            #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
-            #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
-            #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
-            #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
-                # p = module.o_proj.weight
-                # guard against deprecated behavior
                 raise ValueError("This is not supposed to happen")
             elif hasattr(module, 'out_proj'):
                 p = module.out_proj.weight
             elif hasattr(module, 'down_proj'):
                 p = module.down_proj.weight
             if p is not None:
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                # We need to reinit p since this code could be called multiple times
-                # Having just p *= scale would repeatedly scale it down
                 nn.init.kaiming_uniform_(p, a=math.sqrt(5))
                 with torch.no_grad():
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
@@ -695,13 +587,10 @@ class HAttentionPreTrainedModel(PreTrainedModel, GenerationMixin):
 class HAttentionModel(HAttentionPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
-
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([HAttentionBlock(config, layer_idx=idx) for idx in range(config.num_hidden_layers)])
-
         self.gradient_checkpointing = False
         self.norm_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        # Initialize weights and apply final processing
         self._register_load_state_dict_pre_hook(self.load_hook)
         self.post_init()
 
@@ -735,7 +624,7 @@ class HAttentionModel(HAttentionPreTrainedModel):
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if (input_ids is None) ^ (inputs_embeds is not None):  # ^ is python for xor
+        if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if inputs_embeds is None:
@@ -751,9 +640,6 @@ class HAttentionModel(HAttentionPreTrainedModel):
                 )
                 cache_position = torch.arange(0, self.config.conv_kernel, device=inputs_embeds.device)
             elif cache_position is None:
-                # cases when we do manual forward instead of using `model.generate` which will initiate
-                # `cache_position` and makes sure it is not None, throw error here instead of doing some
-                # hack to conjecture the current cache position
                 raise ValueError(
                     "You have to specify the `cache_position` manually when `use_cache=True` and `cache_params` is passed, "
                     "you don't have to pass a `cache_params` if you are in prefilling stage because in that case it will "
@@ -780,7 +666,6 @@ class HAttentionModel(HAttentionPreTrainedModel):
                     cache_position=cache_position,
                     attention_mask=attention_mask,
                 )
-
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -807,8 +692,6 @@ class HAttentionForCausalLM(HAttentionPreTrainedModel):
         self.backbone = HAttentionModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None
-
-        # Initialize weights and apply final processing
         self.post_init()
 
     def get_output_embeddings(self):
@@ -836,7 +719,6 @@ class HAttentionForCausalLM(HAttentionPreTrainedModel):
         **kwargs,
     ):
         if use_cache:
-            # `cache_position` should have been initialized in `generate`
             if cache_position is None:
                 raise ValueError(
                     "`cache_position` should not be None as it should have been initialized in "
@@ -845,14 +727,9 @@ class HAttentionForCausalLM(HAttentionPreTrainedModel):
                 )
             if cache_position[0] > 0:
                 input_ids = input_ids[:, -1][..., None]
-
                 if attention_mask is not None:
                     attention_mask = None
             else:
-                # we initialize the `cache_position` to full size of `conv_states` at prefill stage
-                # considering padding will be applied when input length is shorter, and truncation
-                # will be applied when it is longer, so it will be equivalent to always have it match
-                # the length of `cache_params.conv_states`, which is `config.conv_kernel`
                 cache_position = torch.arange(0, self.config.conv_kernel, device=input_ids.device)
 
         if inputs_embeds is not None and cache_params is None:
@@ -885,14 +762,8 @@ class HAttentionForCausalLM(HAttentionPreTrainedModel):
         cache_position: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         logits_to_keep: Optional[int] = 0,
-        **kwargs,  # for now we need this for generation
+        **kwargs,
     ) -> Union[Tuple, Mamba2CausalLMOutput]:
-        r"""
-        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Labels for language modeling. Note that the labels **are shifted** inside the model, i.e. you can set
-            `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
-            are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
-        """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         outputs = self.backbone(
