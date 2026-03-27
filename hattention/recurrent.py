@@ -97,7 +97,7 @@ class HState(object):
         self,
         other: Float[torch.Tensor, "batch num_heads num_units_state num_units_head num_levels"],
     ) -> Float[torch.Tensor, "batch num_heads num_units_state num_units_head"]:
-        return einsum(self.states, other, "b h dk dv l, b h dk dv l -> b h dk dv")
+        return einsum(self.states.clone(), other, "b h dk dv l, b h dk dv l -> b h dk dv")
 
     def reset_states(self) -> None:
         self.states = torch.zeros_like(self.states)

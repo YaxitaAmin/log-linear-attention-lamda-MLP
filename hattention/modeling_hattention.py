@@ -206,6 +206,14 @@ class HAttentionMixer(nn.Module):
             self.lambda_level_module = None
             self.lambda_level_fixed = True
 
+        elif LAMBDA_MODE_TYPE == "linear":
+            self.lambda_level_module = None
+            self.lambda_level_fixed = False
+
+        elif LAMBDA_MODE_TYPE == "linear":
+            self.lambda_level_module = None
+            self.lambda_level_fixed = True
+
         elif LAMBDA_MODE_TYPE == "mlp_softplus":
             self.lambda_level_module = LambdaMLPSoftplus(
                 num_levels=MAX_NUM_LEVELS,
@@ -470,12 +478,103 @@ class HAttentionMixer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ):
         if "cuda" in self.in_proj.weight.device.type:
+            # use recurrent path for small state sizes (kernel requires >= 64)
+            if self.ssm_state_size < 64 or self.head_dim < 64:
+                return self.recurrent_forward(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask)
             return self.cuda_kernels_forward(
                 hidden_states=hidden_states,
                 cache_params=cache_params,
                 cache_position=cache_position,
                 attention_mask=attention_mask)
-        raise NotImplementedError
+        return self.recurrent_forward(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask)
+
+    def recurrent_forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ):
+        from hattention.recurrent import hattention_recurrent
+        from hattention.mamba_apis import compute_lambda_maybe_fixed
+
+        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+        projected_states = self.in_proj(hidden_states)
+
+        batch_size, seq_len, _ = hidden_states.shape
+        groups_time_state_size = self.n_groups * self.ssm_state_size
+
+        gate, xBC, dt, dl = torch.split(
+            projected_states,
+            [
+                self.intermediate_size,
+                self.conv_dim,
+                self.num_heads,
+                self.num_heads * self.num_lambda_dims,
+            ],
+            dim=-1,
+        )
+
+        # conv1d
+        xBC = torch.nn.functional.conv1d(
+            xBC.transpose(1, 2),
+            self.conv1d.weight.squeeze(1).unsqueeze(1).expand(-1, 1, -1),
+            self.conv1d.bias,
+            padding=self.conv_kernel_size - 1,
+            groups=self.conv_dim,
+        ).transpose(1, 2)[:, :seq_len, :]
+
+        x, B, C = torch.split(
+            xBC,
+            [self.intermediate_size, groups_time_state_size, groups_time_state_size],
+            dim=-1,
+        )
+
+        A  = -torch.exp(self.A_log.float())
+        dt = torch.nn.functional.softplus(dt + self.dt_bias)
+
+        # reshape for recurrent
+        x_r  = rearrange(x,  "b l (h p) -> b l h p", h=self.num_heads)
+        B_r  = rearrange(B,  "b l (g n) -> b l g n", g=self.n_groups)
+        C_r  = rearrange(C,  "b l (g n) -> b l g n", g=self.n_groups)
+        dl_r = rearrange(dl, "b l (h e) -> b l h e", h=self.num_heads)
+
+        # compute lambda
+        L = compute_lambda_maybe_fixed(
+            L=self.L,
+            dl=dl_r,
+            lambda_mode=self.lambda_mode,
+            lambda_level_max=MAX_NUM_LEVELS,
+            lambda_level_fixed=self.lambda_level_fixed,
+            lambda_level_module=self.lambda_level_module,
+        )
+
+        # expand B and C to match num_heads
+        B_exp = B_r.repeat(1, 1, self.num_heads // self.n_groups, 1)
+        C_exp = C_r.repeat(1, 1, self.num_heads // self.n_groups, 1)
+
+        # scale x by dt, compute A decay
+        x_scaled = x_r.clone() * dt.unsqueeze(-1).clone()
+        A_dt     = torch.exp(A[None, None, :] * dt)
+
+        y, _ = hattention_recurrent(
+            Q=C_exp.float(),
+            K=B_exp.float(),
+            V=x_scaled.float(),
+            A=A_dt.float(),
+            B=None,
+            L=L.float(),
+            base=LAMBDA_LEVEL_BASE,
+            htype=LAMBDA_HTYPE,
+            hstruct=LAMBDA_HSTRUCT,
+        )
+
+        y = y + x_r.float() * self.D[None, None, :, None]
+        y = rearrange(y.to(hidden_states.dtype), "b l h p -> b l (h p)")
+        y = self.norm(y, gate)
+        return self.out_proj(y)
 
 
 class HAttentionBlock(nn.Module):

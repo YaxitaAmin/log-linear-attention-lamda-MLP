@@ -6,11 +6,10 @@ def test_softplus():
     batch, seqlen, nheads, hidden_dim, num_levels = 2, 16, 4, 64, 12
 
     mlp = LambdaMLPSoftplus(
-        input_dim=hidden_dim,
-        hidden_dim=hidden_dim,
-        num_levels=num_levels)
+        num_levels=num_levels,
+        hidden_dim=hidden_dim)
 
-    x = torch.randn(batch, seqlen, nheads, hidden_dim)
+    x = torch.randn(batch, seqlen, nheads, num_levels)
     out = mlp(x)
 
     print(f"  Input shape:  {x.shape}")
@@ -26,11 +25,10 @@ def test_softmax():
     batch, seqlen, nheads, hidden_dim, num_levels = 2, 16, 4, 64, 12
 
     mlp = LambdaMLPSoftmax(
-        input_dim=hidden_dim,
-        hidden_dim=hidden_dim,
-        num_levels=num_levels)
+        num_levels=num_levels,
+        hidden_dim=hidden_dim)
 
-    x = torch.randn(batch, seqlen, nheads, hidden_dim)
+    x = torch.randn(batch, seqlen, nheads, num_levels)
     out = mlp(x)
 
     print(f"  Input shape:  {x.shape}")
@@ -49,11 +47,10 @@ def test_identity_init():
     batch, seqlen, nheads, hidden_dim, num_levels = 1, 8, 2, 64, 12
 
     mlp = LambdaMLPSoftplus(
-        input_dim=hidden_dim,
-        hidden_dim=hidden_dim,
-        num_levels=num_levels)
+        num_levels=num_levels,
+        hidden_dim=hidden_dim)
 
-    x = torch.zeros(batch, seqlen, nheads, hidden_dim)
+    x = torch.zeros(batch, seqlen, nheads, num_levels)
     out = mlp(x)
 
     print(f"  Output at zero input: {out.mean().item():.4f} (should be ≈ 1.0)")

@@ -122,15 +122,17 @@ def compute_lambda_maybe_fixed(
 ) -> torch.Tensor:
     
     if lambda_level_fixed:
-        # Original baseline: λ = softplus(L * W·x)
+        # fixed mode: vanilla linear attention, no log-linear
         return compute_lambda(L=L, dl=dl, lambda_mode=lambda_mode)
-    
+
+    elif lambda_level_module is None:
+        # linear mode: log-linear with simple learned linear lambda (paper baseline)
+        return compute_lambda(L=L, dl=dl, lambda_mode=lambda_mode)
+
     elif isinstance(lambda_level_module, (LambdaMLPSoftplus, LambdaMLPSoftmax)):
-        # YOUR MLP variants 🔥
-        # dl shape: (batch, seqlen, nheads, input_dim)
-        # output shape: (batch, seqlen, nheads, num_levels)
+        # MLP variants: your contribution
         return lambda_level_module(dl)
-    
+
     else:
         # Original RoPE-based MLP (their expensive version)
         warnings.warn(click.style("[HAttention] Using non-fixed lambda mode", fg="yellow"))
