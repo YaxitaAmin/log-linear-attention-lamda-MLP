@@ -10,33 +10,35 @@ import argparse
 
 
 def generate_mqar_dataset(n_samples, seq_len, num_kv_pairs, seed=42):
-    """
-    MQAR: vocab_size=64, random key-value pairs.
-    Keys: 1..31, Values: 32..63
-    Format: [k1 v1 ... kn vn] [PAD...] [q1 a1 ... qn an]
-    """
-    random.seed(seed)
-    torch.manual_seed(seed)
-    vocab_size  = max(64, num_kv_pairs * 4 + 2)
+    np.random.seed(seed)
+    vocab_size  = 8192
     half        = vocab_size // 2
     query_start = seq_len - num_kv_pairs * 2
     input_ids   = torch.zeros(n_samples, seq_len, dtype=torch.long)
     labels      = torch.full((n_samples, seq_len), -100, dtype=torch.long)
 
+    key_choices   = np.arange(1, half)
+    value_choices = np.arange(half, vocab_size)
+
     for b in range(n_samples):
-        keys    = random.sample(range(1, half), num_kv_pairs)
-        values  = random.sample(range(half, vocab_size), num_kv_pairs)
-        kv_dict = dict(zip(keys, values))
+        keys   = np.random.choice(key_choices,   size=num_kv_pairs, replace=False)
+        values = np.random.choice(value_choices, size=num_kv_pairs, replace=False)
+        kv_dict = dict(zip(keys.tolist(), values.tolist()))
+
         for i, (k, v) in enumerate(zip(keys, values)):
-            input_ids[b, i*2]     = k
-            input_ids[b, i*2 + 1] = v
-        query_keys = random.sample(keys, num_kv_pairs)
+            input_ids[b, i*2]     = int(k)
+            input_ids[b, i*2 + 1] = int(v)
+
+        query_keys = np.random.choice(keys, size=num_kv_pairs, replace=False)
         for i, qk in enumerate(query_keys):
             pos = query_start + i * 2
-            input_ids[b, pos]     = qk
-            input_ids[b, pos + 1] = kv_dict[qk]
-            labels[b, pos + 1]    = kv_dict[qk]
+            input_ids[b, pos] = int(qk)
+            # answer position stays 0, gets randomized below
+            labels[b, pos + 1] = kv_dict[int(qk)]
 
+    # replace zeros with random tokens (Zoology style)
+    mask = input_ids == 0
+    input_ids[mask] = torch.randint(1, vocab_size, (mask.sum(),))
     return input_ids, labels
 
 
@@ -47,43 +49,34 @@ def train_mqar(lambda_mode, num_kv_pairs, seq_len, batch_size,
     random.seed(seed)
     np.random.seed(seed)
 
-    for k in list(__import__('sys').modules.keys()):
-        if "hattention" in k:
-            del __import__('sys').modules[k]
-
+    # set lambda mode before importing model
     import hattention.modeling_hattention as mh
     mh.LAMBDA_MODE_TYPE      = lambda_mode
     mh.LAMBDA_MLP_HIDDEN_DIM = mlp_hidden_dim
 
-    from hattention.configuration_hattention import HAttentionConfig
-    from hattention.modeling_hattention import HAttentionForCausalLM
+    from hattention.base import get_num_levels
+    from mqar_model import MQARModel
 
     n_train = 10000
     n_val   = 1000
+    print("Generating datasets...")
     train_x, train_y = generate_mqar_dataset(n_train, seq_len, num_kv_pairs, seed=seed)
     val_x,   val_y   = generate_mqar_dataset(n_val,   seq_len, num_kv_pairs, seed=seed+1)
     train_x, train_y = train_x.to(device), train_y.to(device)
     val_x,   val_y   = val_x.to(device),   val_y.to(device)
+    print("Done!")
 
-    # paper's exact config: state_size=16, head_dim=model_dim
-    config = HAttentionConfig(
-        hidden_size=64,
+    num_levels = get_num_levels(seq_len, base=2)
+    model = MQARModel(
+        vocab_size=8192,
+        d_model=64,
         num_heads=1,
-        num_hidden_layers=2,
-        vocab_size=max(64, num_kv_pairs * 4 + 2),
         state_size=model_dim,
-        head_dim=model_dim,
-        expand=1,
-        chunk_size=64,
-        fuse_cross_entropy=False,
-        fuse_norm=False,
-        residual_in_fp32=False,
-    )
+        num_levels=num_levels,
+        n_layers=2,
+    ).to(device)
 
-    model = HAttentionForCausalLM(config).to(device)
-    model.backbone.gradient_checkpointing = False
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\n{'='*60}")
     print(f"Mode: {lambda_mode} | dim: {model_dim} | kv: {num_kv_pairs} | seed: {seed} | params: {total_params:,}")
@@ -95,10 +88,10 @@ def train_mqar(lambda_mode, num_kv_pairs, seq_len, batch_size,
         idx = torch.randperm(n_train, device=device)[:batch_size]
         x, y = train_x[idx], train_y[idx]
 
-        out  = model(input_ids=x)
-        sl   = out.logits[:, :-1].contiguous()
-        sy   = y[:, 1:].contiguous()
-        mask = sy != -100
+        logits = model(x)
+        sl     = logits[:, :-1].contiguous()
+        sy     = y[:, 1:].contiguous()
+        mask   = sy != -100
         if mask.sum() == 0:
             continue
         loss = F.cross_entropy(sl[mask], sy[mask])
@@ -115,11 +108,11 @@ def train_mqar(lambda_mode, num_kv_pairs, seq_len, batch_size,
                 for i in range(0, n_val, batch_size):
                     xb = val_x[i:i+batch_size]
                     yb = val_y[i:i+batch_size]
-                    out  = model(input_ids=xb)
-                    sl   = out.logits[:, :-1].contiguous()
-                    sy   = yb[:, 1:].contiguous()
-                    mask = sy != -100
-                    preds = sl.argmax(-1)
+                    logits = model(xb)
+                    sl     = logits[:, :-1].contiguous()
+                    sy     = yb[:, 1:].contiguous()
+                    mask   = sy != -100
+                    preds  = sl.argmax(-1)
                     correct += (preds[mask] == sy[mask]).sum().item()
                     total   += mask.sum().item()
                 acc = correct / total * 100
@@ -141,7 +134,7 @@ if __name__ == "__main__":
                         choices=["fixed", "mlp_softplus", "mlp_softmax"])
     parser.add_argument("--mlp_hidden_dim", type=int,   default=64)
     parser.add_argument("--model_dim",      type=int,   default=16,
-                        help="state_size and head_dim (16, 32, or 64)")
+                        help="state_size (16, 32, or 64)")
     parser.add_argument("--num_kv_pairs",   type=int,   default=4)
     parser.add_argument("--seq_len",        type=int,   default=256)
     parser.add_argument("--batch_size",     type=int,   default=64)
