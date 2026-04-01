@@ -24,7 +24,7 @@ HTYPE      = HType.WEAK
 HSTRUCT    = HStruct.MAMBA2
 
 
-def generate_mqar(n_samples, seq_len, num_kv_pairs, vocab_size=8192, seed=42):
+def generate_mqar(n_samples, seq_len, num_kv_pairs, vocab_size=128, seed=42):
     np.random.seed(seed)
     half        = vocab_size // 2
     query_start = seq_len - num_kv_pairs * 2
@@ -153,20 +153,23 @@ class MQARModel(nn.Module):
 
 
 def train(lambda_mode, model_dim, num_kv_pairs, seq_len, batch_size,
-          max_steps, lr, mlp_hidden_dim, seed, device):
+          max_steps, lr, mlp_hidden_dim, seed, device, test_seq_len=None):
+    if test_seq_len is None:
+        test_seq_len = seq_len
 
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
-    vocab_size = 8192
-    num_levels = get_num_levels(seq_len, base=LEVEL_BASE)
+    vocab_size = 128
+    max_seq = test_seq_len if test_seq_len is not None else seq_len
+    num_levels = get_num_levels(max_seq, base=LEVEL_BASE)
     n_train    = 10000
     n_val      = 1000
 
     print(f"Generating data (num_levels={num_levels})...")
     train_x, train_y = generate_mqar(n_train, seq_len, num_kv_pairs, vocab_size, seed=seed)
-    val_x,   val_y   = generate_mqar(n_val,   seq_len, num_kv_pairs, vocab_size, seed=seed+1)
+    val_x,   val_y   = generate_mqar(n_val,   test_seq_len, num_kv_pairs, vocab_size, seed=seed+1)
     train_x, train_y = train_x.to(device), train_y.to(device)
     val_x,   val_y   = val_x.to(device),   val_y.to(device)
 
@@ -244,6 +247,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_steps",      type=int,   default=20000)
     parser.add_argument("--lr",             type=float, default=3e-4)
     parser.add_argument("--seed",           type=int,   default=0)
+    parser.add_argument("--test_seq_len",   type=int,   default=None)
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -260,4 +264,5 @@ if __name__ == "__main__":
         mlp_hidden_dim=args.mlp_hidden_dim,
         seed=args.seed,
         device=device,
+        test_seq_len=args.test_seq_len,
     )
