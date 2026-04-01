@@ -17,3 +17,6 @@ lambda_heatmap.png
 # System/HPC specific
 .cache/
 .triton/
+*.pt
+__pycache__/
+venv/
