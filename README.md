@@ -1,7 +1,6 @@
-# Log Linear Attention
-
-![Figure](figs/recurrent.png)
 # MLP-Parameterized Lambda in Log-Linear Attention
+
+![Figure](figs/loglinearlambda.drawio.png)
 
 Forked from [HanGuo97/log-linear-attention](https://github.com/HanGuo97/log-linear-attention) (ICLR 2026).
 
