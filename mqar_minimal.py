@@ -1,7 +1,3 @@
-"""
-Minimal self-contained MQAR experiment for Log-Linear Attention.
-No HuggingFace. Zoology-style data. Official hattention Triton kernel.
-"""
 import sys
 sys.path.insert(0, "/scratch/zt1/project/msml612/user/yaxita/log-linear-attention/flame/3rdparty/flash-linear-attention")
 sys.path.insert(1, "/scratch/zt1/project/msml612/user/yaxita/log-linear-attention")
