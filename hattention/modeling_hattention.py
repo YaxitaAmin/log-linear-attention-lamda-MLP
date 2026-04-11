@@ -30,8 +30,10 @@ from transformers.utils.deprecation import deprecate_kwarg
 import importlib.util as _ilu
 import types as _types
 
+from hattention.config import get_fla_base_path
+
 def _load_fla_module(rel_path):
-    base = "/scratch/zt1/project/msml612/user/yaxita/log-linear-attention/flame/3rdparty/flash-linear-attention/"
+    base = get_fla_base_path()
     spec = _ilu.spec_from_file_location("_fla_mod", base + rel_path)
     mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)
