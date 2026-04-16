@@ -39,7 +39,7 @@ for mode in "${LAMBDA_MODES[@]}"; do
       echo "[Run $CURRENT_RUN/$TOTAL_RUNS] lambda_mode=$mode mlp_hidden_dim=$dh seed=$seed"
       echo "---"
       
-      python train_lm.py \
+      python3 train_lm.py \
         --lambda_mode "$mode" \
         --mlp_hidden_dim "$dh" \
         --model_dim "$MODEL_DIM" \
