@@ -6,12 +6,12 @@ Forked from [HanGuo97/log-linear-attention](https://github.com/HanGuo97/log-line
 
 We replace the static linear λ projection in Log-Linear Attention with a small two-layer MLP, enabling input-dependent memory weighting across Fenwick-tree levels. This improves associative recall under high complexity and length generalization.
 
-| Model | kv=32 accuracy | Length gen. (128→256) | Wikitext-2 PPL |
+| Model | kv=32 accuracy | Length gen. (128→256) | Wikitext-103 PPL |
 |---|---|---|---|
 | Fixed λ (baseline) | 60.9 ± 46.7 | 3.3% | coming soon |
 | **MLP Softplus λ (ours)** | **99.6 ± 0.1** | **33.2%** | coming soon |
 
-# Language modeling experiments (Wikitext-2) are in progress.
+# Language modeling experiments (Wikitext-103) are in progress.
 
 Our contribution lives in `hattention/lambda_mlp.py` (`LambdaMLPSoftplus`, `LambdaMLPSoftmax`).
 
