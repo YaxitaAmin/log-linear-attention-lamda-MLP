@@ -6,6 +6,11 @@ import random
 import numpy as np
 from data_utils import get_wikitext103_dataloader
 
+def log(log_path, msg):
+    print(msg)
+    with open(log_path, "a") as f:
+        f.write(msg + "\n")
+        
 def set_seed(seed):
     torch.manual_seed(seed)
     random.seed(seed)
@@ -71,6 +76,7 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     os.makedirs(args.output_dir, exist_ok=True)
+    log_path = f"{args.output_dir}/train_log.txt"
 
     step = 0
     best_val_loss = float("inf")
@@ -99,7 +105,7 @@ def train(args):
 
         if step % 100 == 0:
             ppl = torch.exp(loss).item()
-            print(f"Step {step} | train loss: {loss.item():.4f} | ppl: {ppl:.2f}")
+            log(log_path, f"Step {step} | train loss: {loss.item():.4f} | ppl: {ppl:.2f}")
 
         if step % args.val_every == 0 and step > 0:
             model.eval()
@@ -112,7 +118,8 @@ def train(args):
                     val_losses.append(outputs.loss.item())
             val_loss = sum(val_losses) / len(val_losses)
             val_ppl = torch.exp(torch.tensor(val_loss)).item()
-            print(f"Step {step} | val loss: {val_loss:.4f} | val ppl: {val_ppl:.2f}")
+            log(log_path, f"Step {step} | val loss: {val_loss:.4f} | val ppl: {val_ppl:.2f}")
+            
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -128,7 +135,8 @@ def train(args):
         step += 1
 
     best_ppl = torch.exp(torch.tensor(best_val_loss)).item()
-    print(f"Done! Best val ppl: {best_ppl:.2f}")
+    log(log_path, f"Done! Best val ppl: {best_ppl:.2f}")
+
 
     results = {
         "mode": args.mode,
