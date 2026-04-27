@@ -2,28 +2,37 @@ import torch
 import argparse
 import os
 import json
+import random
+import numpy as np
 from data_utils import get_wikitext103_dataloader
 
+def set_seed(seed):
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
 def train(args):
+    set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # load data
     print("Loading data...")
     train_loader, train_size = get_wikitext103_dataloader("train", args.seq_len, args.batch_size, device)
     val_loader, val_size = get_wikitext103_dataloader("validation", args.seq_len, args.batch_size, device)
     print(f"Train size: {train_size}, Val size: {val_size}")
 
-    # patch lambda mode globally before importing model
     import hattention.modeling_hattention as mh
-    if args.mode == "mlp":
+    if args.mode == "mlp_softplus":
         mh.LAMBDA_MODE_TYPE = "mlp_softplus"
+    elif args.mode == "mlp_softmax":
+        mh.LAMBDA_MODE_TYPE = "mlp_softmax"
     elif args.mode == "fixed":
         mh.LAMBDA_MODE_TYPE = "fixed"
     mh.LAMBDA_MLP_HIDDEN_DIM = 64
 
     print(f"Loading model: {args.mode}")
-    if args.mode in ["mlp", "fixed"]:
+    if args.mode in ["mlp_softplus", "mlp_softmax", "fixed"]:
         from hattention.modeling_hattention import HAttentionForCausalLM
         from hattention.configuration_hattention import HAttentionConfig
         config = HAttentionConfig(
@@ -52,7 +61,6 @@ def train(args):
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {num_params:,}")
 
-    # warmup + cosine scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.1)
     warmup_steps = 500
     def lr_lambda(step):
@@ -124,6 +132,10 @@ def train(args):
 
     results = {
         "mode": args.mode,
+        "hidden_size": args.hidden_size,
+        "seq_len": args.seq_len,
+        "max_steps": args.max_steps,
+        "seed": args.seed,
         "best_val_loss": best_val_loss,
         "best_val_ppl": best_ppl,
     }
@@ -133,7 +145,7 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, required=True, choices=["mlp", "fixed", "softmax"])
+    parser.add_argument("--mode", type=str, required=True, choices=["mlp_softplus", "mlp_softmax", "fixed", "softmax"])
     parser.add_argument("--hidden_size", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=6)
     parser.add_argument("--num_heads", type=int, default=4)
@@ -143,6 +155,7 @@ if __name__ == "__main__":
     parser.add_argument("--val_every", type=int, default=500)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output_dir", type=str, default="results/lm")
     args = parser.parse_args()
     train(args)
