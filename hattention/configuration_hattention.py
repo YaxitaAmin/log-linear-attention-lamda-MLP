@@ -13,6 +13,15 @@
 # limitations under the License.
 """HATTENTION configuration"""
 
+import sys
+from pathlib import Path
+
+# Add FLA (Flash-Linear-Attention) to path for dynamic imports
+from hattention.config import get_fla_base_path
+_fla_base = Path(get_fla_base_path()).parent  # Remove trailing slash
+if str(_fla_base) not in sys.path:
+    sys.path.insert(0, str(_fla_base))
+
 from fla.models.mamba2 import Mamba2Config
 
 

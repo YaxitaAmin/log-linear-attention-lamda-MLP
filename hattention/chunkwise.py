@@ -18,7 +18,7 @@ BLOCK_SIZE_OPTIONS = [32, 64]  # [32, 64, 128]
 NUM_STAGES_OPTIONS = [2, 3, 4]
 
 
-def fn: Callable -> Callable:
+def assert_contiguous(fn: Callable) -> Callable:
     @functools.wraps(fn)
     def wrapper(*args, **kwargs) -> Any:
         for arg in args:
@@ -1181,7 +1181,7 @@ def chunkwise_fwd(
     def grid_o(meta): return (triton.cdiv(V, meta["BV"]), NT, B * H)
     def grid_h(meta): return (triton.cdiv(K, meta["BK"]), triton.cdiv(V, meta["BV"]), B * H)
 
-    chunk_fwd_kernel_o[grid_o](
+    assert_contiguous(chunk_fwd_kernel_o[grid_o])(
         q=q,
         k=k,
         v=v,
@@ -1217,7 +1217,7 @@ def chunkwise_fwd(
     else:
         ell_init = 1
     for ell in range(ell_init, num_chunk_levels):
-        chunk_fwd_kernel_h[grid_h](
+        assert_contiguous(chunk_fwd_kernel_h[grid_h])(
             k=k,
             v=v,
             h=h,
@@ -1245,7 +1245,7 @@ def chunkwise_fwd(
         # to get the level corresponding to `ell`-th step, notice that
         # when `ell = num_chunk_levels`, it must be the case that `level = L`
         # hence we get tje level backwards
-        chunk_fwd_kernel_o[grid_o](
+        assert_contiguous(chunk_fwd_kernel_o[grid_o])(
             q=q,
             k=k,        # unused
             v=v,        # unused
@@ -1388,7 +1388,7 @@ def chunkwise_bwd(
     grid_dqkwg = (NK, NT, B * H)
     grid_dv    = (NV, NT, B * H)
 
-    chunk_bwd_kernel_dqkwg[grid_dqkwg](
+    assert_contiguous(chunk_bwd_kernel_dqkwg[grid_dqkwg])(
         q=q,
         k=k,
         v=v,
@@ -1425,7 +1425,7 @@ def chunkwise_bwd(
         USE_H2=False,
     )
 
-    chunk_bwd_kernel_dv[grid_dv](
+    assert_contiguous(chunk_bwd_kernel_dv[grid_dv])(
         q=q,
         k=k,
         g=g,
@@ -1463,7 +1463,7 @@ def chunkwise_bwd(
         ell_init = 1
     for ell in range(ell_init, num_chunk_levels):
 
-        chunk_fwd_kernel_h[grid_h](
+        assert_contiguous(chunk_fwd_kernel_h[grid_h])(
             k=k,
             v=v,
             h=h,
@@ -1488,7 +1488,7 @@ def chunkwise_bwd(
             MODE_H2=MODE_H2,
         )
 
-        chunk_bwd_kernel_dh[grid_dh](
+        assert_contiguous(chunk_bwd_kernel_dh[grid_dh])(
             q=q,
             g=g,
             l=l,
@@ -1514,7 +1514,7 @@ def chunkwise_bwd(
             MODE_H2=MODE_H2,
         )
 
-        chunk_bwd_kernel_dqkwg[grid_dqkwg](
+        assert_contiguous(chunk_bwd_kernel_dqkwg[grid_dqkwg])(
             q=q,
             k=k,
             v=v,
@@ -1551,7 +1551,7 @@ def chunkwise_bwd(
             USE_H2=(htype == HType.STRONG),
         )
 
-        chunk_bwd_kernel_dv[grid_dv](
+        assert_contiguous(chunk_bwd_kernel_dv[grid_dv])(
             q=q,
             k=k,
             g=g,
