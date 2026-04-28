@@ -44,6 +44,10 @@ def get_requirements() -> List[str]:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []
         for line in requirements:
+            # Skip empty lines, comments, and editable installs
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("-e "):
+                continue
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
             else:

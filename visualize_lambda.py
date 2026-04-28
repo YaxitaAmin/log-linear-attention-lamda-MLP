@@ -1,6 +1,9 @@
 import sys
-sys.path.insert(0, '/scratch/zt1/project/msml612/user/yaxita/log-linear-attention/flame/3rdparty/flash-linear-attention')
-sys.path.insert(1, '/scratch/zt1/project/msml612/user/yaxita/log-linear-attention')
+import os
+
+# Add project paths dynamically
+project_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(project_root, 'src', 'flash-linear-attention'))
 
 import torch
 import numpy as np

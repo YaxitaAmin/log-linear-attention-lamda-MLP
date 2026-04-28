@@ -29,10 +29,16 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.deprecation import deprecate_kwarg
 import importlib.util as _ilu
 import types as _types
+import os as _os
 
 def _load_fla_module(rel_path):
-    base = "/scratch/zt1/project/msml612/user/yaxita/log-linear-attention/flame/3rdparty/flash-linear-attention/"
-    spec = _ilu.spec_from_file_location("_fla_mod", base + rel_path)
+    # Construct path dynamically relative to this file's location
+    # This file is in hattention/, need to go up to project root, then to src/flash-linear-attention/
+    current_dir = _os.path.dirname(_os.path.abspath(__file__))
+    project_root = _os.path.dirname(current_dir)
+    base = _os.path.join(project_root, "src", "flash-linear-attention")
+    full_path = _os.path.join(base, rel_path)
+    spec = _ilu.spec_from_file_location("_fla_mod", full_path)
     mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
