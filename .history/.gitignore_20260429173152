@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+
+# Model weights and data
+*.pt
+*.pth
+*.h5
+
+# Logs and Plots
+*.log
+lambda_heatmap.png
+.matplotlib_cache/
+
+# System/HPC specific
+.cache/
+.triton/
+*.pt
+__pycache__/
+venv/
